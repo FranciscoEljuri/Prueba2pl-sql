@@ -1,0 +1,292 @@
+VARIABLE B_FECHA_MES VARCHAR2(2);
+VARIABLE B_FECHA_ANIO VARCHAR2(4);
+VARIABLE B_VALOR_ARRIENDOS NUMBER;
+DECLARE
+V_CODIGO_ERROR VARCHAR2(200);
+---DECLARO EL VARRAY DE ASIGNACIONES:
+    TYPE T_ASIGNACIONES IS VARRAY(4) OF NUMBER;
+    V_ASIGNACIONES T_ASIGNACIONES := T_ASIGNACIONES(15, 1200, 275000, 19);
+
+--DECLARO EL TYPE Y UN VARRAY PARA LA FECHA
+    TYPE T_FECHAS IS VARRAY(2) OF VARCHAR2(10);
+    V_FECHA T_FECHAS := T_FECHAS(TO_CHAR(SYSDATE,'MM'), TO_CHAR(SYSDATE,'YYYY'));
+    
+---DECLARO EL CURSOR DE CENTRO DE DISTRIBUCION
+    CURSOR CUR_CENTROS_DISTRIBUCION IS
+        SELECT CODIGO,
+                NOMBRE,
+                LARGO,
+                ANCHO
+        FROM CENTRO_DISTRIBUCION
+        ;
+        
+--DECLARO EL TYPE DE CENTRO DE DISTRIBUCION    
+    TYPE T_CENTRO_DISTRIBUCION IS RECORD(
+        CODIGO  CENTRO_DISTRIBUCION.CODIGO%TYPE,
+        NOMBRE  CENTRO_DISTRIBUCION.NOMBRE%TYPE,
+        LARGO   CENTRO_DISTRIBUCION.LARGO%TYPE,
+        ANCHO   CENTRO_DISTRIBUCION.ANCHO%TYPE
+    );
+    
+--DECLARO EL CURSOR DE PRODUCTOS CON PARAMETRO
+    CURSOR CUR_PRODUCTOS(PAR_CODIGO_CENTRO_DISTRIBUCION VARCHAR2) IS
+        SELECT  CODIGO,
+                NOMBRE,
+                PAR_CODIGO_CENTRO_DISTRIBUCION,
+                PRECIO_COMPRA,
+                PAIS_ORIGEN,
+                STOCK
+        FROM PRODUCTO
+        WHERE CENTRO_DISTRIBUCION_CODIGO = PAR_CODIGO_CENTRO_DISTRIBUCION
+        ;
+        
+--DECLARO EL TYPE DE PRODUCTOS
+    TYPE T_PRODUCTO IS RECORD(
+        CODIGO  PRODUCTO.CODIGO%TYPE,
+        NOMBRE  PRODUCTO.NOMBRE%TYPE,
+        CODIGO_CENTRO   PRODUCTO.CENTRO_DISTRIBUCION_CODIGO%TYPE,
+        PRECIO_COMPRA   PRODUCTO.PRECIO_COMPRA%TYPE,
+        PAIS_ORIGEN     PRODUCTO.PAIS_ORIGEN%TYPE,
+        STOCK           PRODUCTO.STOCK%TYPE
+    );
+
+--VARIABLES CENTRO DE DISTRIBUCION
+    V_CENTRO_DISTRIBUCION   T_CENTRO_DISTRIBUCION;
+    V_STOCK_DISTRIBUCION    PRODUCTO.STOCK%TYPE;
+    V_COSTO_OPERACIONES NUMBER;
+    V_AREA  NUMBER;
+    V_MAXIMO_VALOR  AREA_MANTENCION.VALOR%TYPE;
+    V_COSTO_MANTENCION  NUMBER;
+        
+--VARIABLES PRODUCTO
+    V_PRODUCTO  T_PRODUCTO;
+    V_PORC_AUMENTO_PAIS     AUMENTO_PAIS.PORCENTAJE%TYPE;
+    V_PRECIO_CON_IVA    NUMBER;
+    V_PRECIO_VENTA  NUMBER;
+    V_CANTIDAD_VENDIDA  NUMBER;
+    V_DESC_CANT_OFERTA CANTIDAD_OFERTA.DESCUENTO%TYPE;
+    V_PRECIO_OFERTA  NUMBER;
+    V_CANT_PROYECCION PROYECCION_STOCK.PROYECCION%TYPE;
+    V_PRECIO_PROYECCION NUMBER;
+    V_STOCK_PROYECCION  NUMBER;
+    V_CANT_VEND_MAX NUMBER;
+    V_PRECIO_FINAL  NUMBER;
+    
+BEGIN
+--VARIABLE BEANS
+    :B_VALOR_ARRIENDOS:=12000000;
+    :B_FECHA_MES:= V_FECHA(1);
+    :B_FECHA_ANIO:= V_FECHA(2);
+    
+--LOS DELETE PARA QUE ESTE REFRESCADO BIEN LAS TABLAS REQUERIDAS
+    DELETE FROM CENTRO_DISTRIBUCION_MENSUAL;
+    DELETE FROM PRODUCTO_MENSUAL;
+    DELETE FROM ERROR_PROCESO;
+    
+--ABRO Y CIERRO EL CURSOR DE CENTRO DE DISTRIBUCION
+
+    OPEN CUR_CENTROS_DISTRIBUCION;
+        LOOP
+            FETCH CUR_CENTROS_DISTRIBUCION INTO V_CENTRO_DISTRIBUCION;
+            EXIT WHEN CUR_CENTROS_DISTRIBUCION%NOTFOUND;
+            
+        ---SACANDO EL STOCK PARA LOS COSTOS DE OPERACIONES
+        
+            SELECT  SUM(STOCK)
+            INTO    V_STOCK_DISTRIBUCION
+            FROM PRODUCTO
+            WHERE CENTRO_DISTRIBUCION_CODIGO = V_CENTRO_DISTRIBUCION.CODIGO
+            ;
+            
+            V_COSTO_OPERACIONES:= (V_STOCK_DISTRIBUCION * V_ASIGNACIONES(1) / 100) * V_ASIGNACIONES(2);
+         --------------------------------------------------
+         
+         --SACANDO EL COSTO DE MANTENCION SACANDO EL AREA DEL CENTRO DE DISTRIBUCION
+         
+            V_AREA:= V_CENTRO_DISTRIBUCION.LARGO * V_CENTRO_DISTRIBUCION.ANCHO;
+         
+            BEGIN
+                SELECT  VALOR
+                INTO   V_COSTO_MANTENCION 
+                FROM    AREA_MANTENCION
+                WHERE   V_AREA BETWEEN AREA_MIN AND AREA_MAX
+                ;
+                
+                SELECT MAX(VALOR)
+                INTO  V_MAXIMO_VALOR
+                FROM AREA_MANTENCION
+                ;
+                
+                IF V_AREA > V_ASIGNACIONES(3) THEN
+                    V_COSTO_MANTENCION:= V_MAXIMO_VALOR * 2;
+                END IF
+                ;
+                
+            EXCEPTION
+                WHEN OTHERS THEN
+                    V_COSTO_MANTENCION:= V_MAXIMO_VALOR * 2;
+                    V_CODIGO_ERROR := SQLERRM;
+                    INSERT INTO ERROR_PROCESO VALUES (
+                        SEQ_ERROR_PROCESO.NEXTVAL,
+                        V_CODIGO_ERROR,
+                        'PROBLEMA CON AREA, EN EL COSTO DE MANTENCION SUPERA EL VALOR'
+                    ); 
+            END
+            ;        
+         --------------------------------------------------
+         
+       ----ABRO Y CIERRO EL CURSOR DE PRODUCTO  
+         
+            OPEN CUR_PRODUCTOS(V_CENTRO_DISTRIBUCION.CODIGO);
+                LOOP
+                    FETCH CUR_PRODUCTOS INTO V_PRODUCTO;
+                    EXIT WHEN CUR_PRODUCTOS%NOTFOUND;
+                    
+                    ---SACANDO EL PORCENTAJE DE AUMENTO POR PAIS EN LOS PRODUCTOS SACAR LOS PRECIO VENTA
+                    
+                    V_PRECIO_CON_IVA:= V_PRODUCTO.PRECIO_COMPRA + (V_PRODUCTO.PRECIO_COMPRA * V_ASIGNACIONES(4) / 100);
+                    
+                    BEGIN
+                        SELECT  PORCENTAJE
+                        INTO    V_PORC_AUMENTO_PAIS
+                        FROM    AUMENTO_PAIS
+                        WHERE   CODIGO_PAIS = V_PRODUCTO.PAIS_ORIGEN
+                        ;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            V_PORC_AUMENTO_PAIS:= 1;
+                            V_CODIGO_ERROR := SQLERRM;
+                            INSERT INTO ERROR_PROCESO VALUES (
+                                SEQ_ERROR_PROCESO.NEXTVAL,
+                                V_CODIGO_ERROR,
+                                'PROBLEMA CON EL PORCENTAJE DE AUMENTO, EN EL PRECIO DE VENTA'
+                            );  
+                    END
+                    ;
+                    
+                    IF V_PORC_AUMENTO_PAIS != 1 THEN
+                        V_PRECIO_VENTA:= ROUND(V_PRECIO_CON_IVA + (V_PRECIO_CON_IVA * V_PORC_AUMENTO_PAIS / 100));
+                    ELSE
+                        V_PRECIO_VENTA:= ROUND(V_PRECIO_CON_IVA);
+                    END IF;
+                    
+                    ---------------------------------
+                    
+                    -- SACANDO EL PRECIO OFERTA SACANDO LA SUMA DE VENTAS DE ESOS PRODUCTOS EN EL MES
+                    
+                        BEGIN
+                            SELECT  SUM(CANTIDAD)
+                            INTO V_CANTIDAD_VENDIDA
+                            FROM    DETALLE_VENTA
+                            WHERE PRODUCTO_CODIGO = V_PRODUCTO.CODIGO
+                            ;
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                              V_CODIGO_ERROR := SQLERRM;
+                            INSERT INTO ERROR_PROCESO VALUES (
+                                SEQ_ERROR_PROCESO.NEXTVAL,
+                                V_CODIGO_ERROR,
+                                'PROBLEMA CON LA CANTIDAD DE PRODUCTOS VENDIDOS'
+                            );  
+                        END
+                        ;
+                    
+                        SELECT  DESCUENTO
+                        INTO   V_DESC_CANT_OFERTA
+                        FROM    CANTIDAD_OFERTA
+                        WHERE V_CANTIDAD_VENDIDA BETWEEN CANT_MIN AND CANT_MAX
+                        ; 
+                        
+                        V_PRECIO_OFERTA:= ROUND(V_PRECIO_VENTA - (V_PRECIO_VENTA * V_DESC_CANT_OFERTA /100));
+                        
+                    ----------------
+                    ---SACAMOS EL STOCK PROYECCION SACAREMOS EN PORCENTAJE DE PROYECCION
+                    
+                        BEGIN
+                            SELECT  PROYECCION
+                            INTO    V_CANT_PROYECCION
+                            FROM    PROYECCION_STOCK
+                            WHERE   V_PRODUCTO.STOCK BETWEEN CANT_MIN AND CANT_MAX
+                            ;
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                V_CODIGO_ERROR := SQLERRM;
+                            INSERT INTO ERROR_PROCESO VALUES (
+                                SEQ_ERROR_PROCESO.NEXTVAL,
+                                V_CODIGO_ERROR,
+                                'PROBLEMA CON EL PORCENTAJE DE PROYECCION DE STOCK'
+                            );   
+                        END
+                        ;
+                        
+                        V_PRECIO_PROYECCION:= V_CANT_PROYECCION * V_PRODUCTO.PRECIO_COMPRA;
+                        
+                        V_STOCK_PROYECCION:= V_CANT_PROYECCION + V_PRODUCTO.STOCK;
+                    
+                    -----------------------
+                    ---SACANDO EL PRECIO FINAL COMO VER CUAL ES EL PRODUCTO MAS VENDIDO
+                    
+                       SELECT  MAX(SUM(DV.CANTIDAD))
+                            INTO V_CANT_VEND_MAX
+                            FROM   PRODUCTO P LEFT JOIN DETALLE_VENTA DV ON (P.CODIGO = DV.PRODUCTO_CODIGO)
+                            GROUP BY P.CODIGO
+                            ;
+                    
+                        IF V_CANT_VEND_MAX = V_CANTIDAD_VENDIDA THEN
+                           V_PRECIO_FINAL := ROUND(V_PRECIO_VENTA + (V_PRECIO_VENTA * V_ASIGNACIONES(1) / 100));
+                        ELSE
+                            V_PRECIO_FINAL:= V_PRECIO_VENTA;
+                        END IF
+                        ;
+                        
+                    -------------------------------
+                    --INSERTAMOS LOS DATOS A LA TABLA PRODUCTO_MENSUAL
+                        INSERT INTO PRODUCTO_MENSUAL VALUES(
+                            V_PRODUCTO.CODIGO,
+                            V_PRODUCTO.NOMBRE,
+                            V_PRODUCTO.CODIGO_CENTRO,
+                            :B_FECHA_MES,
+                            :B_FECHA_ANIO,
+                            V_PRODUCTO.PRECIO_COMPRA,
+                            V_PRECIO_VENTA,
+                            V_PRECIO_OFERTA,
+                            V_PRODUCTO.STOCK,
+                            V_STOCK_PROYECCION,
+                            V_PRECIO_FINAL
+                        );
+                    ------------
+                    
+                    DBMS_OUTPUT.PUT_LINE('|   - '||V_PRODUCTO.CODIGO||' | '||V_PRODUCTO.NOMBRE||' | '||V_PRODUCTO.CODIGO_CENTRO||' | '||:B_FECHA_MES||'/'||:B_FECHA_ANIO||' | '||V_PRODUCTO.PRECIO_COMPRA||' | '||V_PRECIO_VENTA||' | '||V_PRECIO_OFERTA||' | '||V_PRODUCTO.STOCK||' | '||V_STOCK_PROYECCION||' | '||V_PRECIO_FINAL);
+                END LOOP;
+            CLOSE CUR_PRODUCTOS;
+      -------------------------------------------- 
+            ---INSERTAMOS LOS DATOS DE LOS CENTROS DE DISTRIBUCION
+            
+            INSERT INTO CENTRO_DISTRIBUCION_MENSUAL VALUES(
+                V_CENTRO_DISTRIBUCION.CODIGO,
+                :B_FECHA_ANIO,
+                :B_FECHA_MES,
+                V_COSTO_OPERACIONES,
+                V_COSTO_MANTENCION,
+                :B_VALOR_ARRIENDO
+            );
+            -------------------
+            DBMS_OUTPUT.PUT_LINE('* '||V_CENTRO_DISTRIBUCION.CODIGO||' | '||V_CENTRO_DISTRIBUCION.NOMBRE||' | '||:B_FECHA_MES||'/'||:B_FECHA_ANIO||' | '||V_COSTO_OPERACIONES||' | '||V_COSTO_MANTENCION||' | '||:B_VALOR_ARRIENDOS);
+        END LOOP;
+    CLOSE CUR_CENTROS_DISTRIBUCION;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('HOUTON TENEMOS UN PROBLEMA');
+        V_CODIGO_ERROR := SQLERRM;
+        INSERT INTO ERROR_PROCESO VALUES (
+            SEQ_ERROR_PROCESO.NEXTVAL,
+            V_CODIGO_ERROR,
+            'HOUTON TENEMOS UN PROBLEMA'
+        );
+END;
+
+--COMPROBAMOS DE QUE LAS TABLAS ESTAN POBLADAS
+SELECT * FROM CENTRO_DISTRIBUCION_MENSUAL;
+SELECT * FROM PRODUCTO_MENSUAL;
+SELECT * FROM ERROR_PROCESO;

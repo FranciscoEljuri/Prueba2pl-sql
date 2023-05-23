@@ -1,0 +1,186 @@
+DECLARE
+----OTRAS VARIABLES
+    V_CODIGO_ERROR VARCHAR2(200);
+
+--DECLARAMOS EL TYPE Y UN VARRAY PARA LA FECHA
+    TYPE T_FECHAS IS VARRAY(2) OF VARCHAR2(10);
+    V_FECHA T_FECHAS := T_FECHAS(TO_CHAR(SYSDATE,'MONTH'), TO_CHAR(SYSDATE,'YYYY'));
+    
+---DECLARAMOS EL CURSOR DE CENTRO DE DISTRIBUCION
+    CURSOR CUR_CENTROS_DISTRIBUCION IS
+        SELECT CODIGO,
+                NOMBRE,
+                LARGO,
+                ANCHO
+        FROM CENTRO_DISTRIBUCION
+        ;
+        
+--DECLARAMOS EL TYPE DE CENTRO DE DISTRIBUCION    
+    TYPE T_CENTRO_DISTRIBUCION IS RECORD(
+        CODIGO  CENTRO_DISTRIBUCION.CODIGO%TYPE,
+        NOMBRE  CENTRO_DISTRIBUCION.NOMBRE%TYPE,
+        LARGO   CENTRO_DISTRIBUCION.LARGO%TYPE,
+        ANCHO   CENTRO_DISTRIBUCION.ANCHO%TYPE
+    );
+    
+--DECLARAMOS EL CURSOR DE PRODUCTOS CON PARAMETRO
+    CURSOR CUR_PRODUCTOS(PAR_CODIGO_CD VARCHAR2) IS
+        SELECT  CODIGO,
+                NOMBRE,
+                PAR_CODIGO_CD,
+                PRECIO_COMPRA,
+                PAIS_ORIGEN,
+                STOCK
+        FROM PRODUCTO
+        WHERE CENTRO_DISTRIBUCION_CODIGO = PAR_CODIGO_CD
+        ;
+        
+--DECLARAMOS EL TYPE DE PRODUCTOS
+    TYPE T_PRODUCTO IS RECORD(
+        CODIGO  PRODUCTO.CODIGO%TYPE,
+        NOMBRE  PRODUCTO.NOMBRE%TYPE,
+        CODIGO_CENTRO   PRODUCTO.CENTRO_DISTRIBUCION_CODIGO%TYPE,
+        PRECIO_COMPRA   PRODUCTO.PRECIO_COMPRA%TYPE,
+        PAIS_ORIGEN     PRODUCTO.PAIS_ORIGEN%TYPE,
+        STOCK           PRODUCTO.STOCK%TYPE
+    );
+    
+--DECLARAMOS LAS VARIABLES
+
+    --VARIABLES CENTRO DE DISTRIBUCION
+        V_CENTRO_DISTRIBUCION   T_CENTRO_DISTRIBUCION;
+        
+        V_AREA  NUMBER;
+        V_VALOR_MANTENCION  AREA_MANTENCION.VALOR%TYPE;
+        
+    --VARIABLES PRODUCTO
+        V_PRODUCTO  T_PRODUCTO;
+        
+        V_PORCENTAJE_PAIS   AUMENTO_PAIS.PORCENTAJE%TYPE;
+        V_PRECIO_VENTA  NUMBER;
+        
+        V_CANT_X_PRODUCTO   NUMBER;
+        V_PORC_DESCUENTO    CANTIDAD_OFERTA.DESCUENTO%TYPE;
+        V_PRECIO_OFERTA     NUMBER;
+        
+        V_STOCK_ACTUAL  NUMBER;
+        V_PORC_PROYECCION NUMBER;
+BEGIN
+--ABRIMOS Y CERRAMOS CURSOR DE CENTRO DE DISTRIBUCION
+
+    OPEN CUR_CENTROS_DISTRIBUCION;
+        LOOP
+            FETCH CUR_CENTROS_DISTRIBUCION INTO V_CENTRO_DISTRIBUCION;
+            EXIT WHEN CUR_CENTROS_DISTRIBUCION%NOTFOUND;
+            
+           --- SACANDO EL COSTO DE MANTENCION 
+           
+            V_AREA:= (V_CENTRO_DISTRIBUCION.LARGO * V_CENTRO_DISTRIBUCION.ANCHO);
+            
+            BEGIN
+                SELECT VALOR
+                INTO    V_VALOR_MANTENCION
+                FROM    AREA_MANTENCION
+                WHERE   V_AREA BETWEEN AREA_MIN AND AREA_MAX
+                ;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    V_VALOR_MANTENCION:= 750000;
+                    V_CODIGO_ERROR := SQLERRM;
+                    INSERT INTO ERROR_PROCESO VALUES (
+                        SEQ_ERROR_PROCESO.NEXTVAL,
+                        V_CODIGO_ERROR,
+                        'ERROR EN EL VALOR DEL AREA DE MANTENCION(NO HAY DATA)'
+                    );
+                WHEN OTHERS THEN
+                    V_CODIGO_ERROR := SQLERRM;
+                    INSERT INTO ERROR_PROCESO VALUES (
+                        SEQ_ERROR_PROCESO.NEXTVAL,
+                        V_CODIGO_ERROR,
+                        'ERROR EN EL VALOR DEL AREA DE MANTENCION'
+                    );
+            END
+            ;
+      -------------------------------------------      
+          
+     -------ABRIMOS Y CERRAMOS CURSOR DE PRODUCTO  
+         
+            OPEN CUR_PRODUCTOS(V_CENTRO_DISTRIBUCION.CODIGO);
+                LOOP
+                    FETCH CUR_PRODUCTOS INTO V_PRODUCTO;
+                    EXIT WHEN CUR_PRODUCTOS%NOTFOUND;
+                    
+                    ---SACANDO PORCENTAJE PARA EL PRECIO VENTA
+                    BEGIN
+                        SELECT  PORCENTAJE
+                        INTO V_PORCENTAJE_PAIS
+                        FROM AUMENTO_PAIS
+                        WHERE CODIGO_PAIS = V_PRODUCTO.PAIS_ORIGEN
+                        ;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            V_PORCENTAJE_PAIS:= 16;
+                            V_CODIGO_ERROR := SQLERRM;
+                            INSERT INTO ERROR_PROCESO VALUES (
+                            SEQ_ERROR_PROCESO.NEXTVAL,
+                            V_CODIGO_ERROR,
+                            'ERROR DE PORCENTAJE (NO SE ENCONTRO EL PAIS)');  
+                    END;
+                    
+                    V_PRECIO_VENTA:= V_PRODUCTO.PRECIO_COMPRA + (V_PRODUCTO.PRECIO_COMPRA * V_PORCENTAJE_PAIS / 100);
+                    -------------------------
+                    -----SACANDO EL PRECIO OFERTA CON LA TABLA CANTIDAD OFERTA SACANDO LAS CANTIDADES DE PRODCUTOS VENDIDAS POR EL MES 
+                    
+                    SELECT  SUM(CANTIDAD)
+                    INTO    V_CANT_X_PRODUCTO
+                    FROM    DETALLE_VENTA
+                    WHERE PRODUCTO_CODIGO = V_PRODUCTO.CODIGO
+                    ;
+                    
+                    SELECT  DESCUENTO
+                    INTO    V_PORC_DESCUENTO
+                    FROM CANTIDAD_OFERTA
+                    WHERE V_CANT_X_PRODUCTO BETWEEN CANT_MIN AND CANT_MAX
+                    ;
+                    
+                    
+                    V_PRECIO_OFERTA:= ROUND(V_PRECIO_VENTA - (V_PRECIO_VENTA * V_PORC_DESCUENTO / 100));
+                    
+                    -----------------------------------------
+                    V_STOCK_ACTUAL:= V_PRODUCTO.STOCK - V_CANT_X_PRODUCTO ;
+                    
+                    BEGIN
+                        SELECT PROYECCION
+                        INTO V_PORC_PROYECCION
+                        FROM PROYECCION_STOCK
+                        WHERE V_STOCK_ACTUAL BETWEEN CANT_MIN AND CANT_MAX;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            V_PORC_PROYECCION:=120;
+                    END
+                    ;
+                    
+                    ------------------------------------------------------
+                    
+                    
+                    
+                    DBMS_OUTPUT.PUT_LINE('|   - '||V_PRODUCTO.CODIGO||' | '||V_PRODUCTO.NOMBRE||' | '||V_PRODUCTO.CODIGO_CENTRO||' | '||RTRIM(V_FECHA(1))||'/'||V_FECHA(2)||' | '||V_PRODUCTO.PRECIO_COMPRA||' | '||V_PRECIO_VENTA||' | '||V_PRECIO_OFERTA||' | '||V_PRODUCTO.STOCK||' | ('||V_STOCK_ACTUAL||') | *'||V_PORC_PROYECCION);
+                END LOOP;
+            CLOSE CUR_PRODUCTOS;
+      --------------------------------------------  
+      
+            DBMS_OUTPUT.PUT_LINE('* '||V_CENTRO_DISTRIBUCION.CODIGO||' | '||V_CENTRO_DISTRIBUCION.NOMBRE||' | '||RTRIM(V_FECHA(1))||'/'||V_FECHA(2)||' | '||V_VALOR_MANTENCION);
+        END LOOP;
+    CLOSE CUR_CENTROS_DISTRIBUCION;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('HOUSTON TENEMOS UN PROBLEMA');
+        V_CODIGO_ERROR := SQLERRM;
+        INSERT INTO ERROR_PROCESO VALUES (
+            SEQ_ERROR_PROCESO.NEXTVAL,
+            V_CODIGO_ERROR,
+            'HOUSTON TENEMOS UN PROBLEMA'
+        );
+END;
+
